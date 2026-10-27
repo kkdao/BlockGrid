@@ -347,6 +347,7 @@
           <option value="sweep">Effect: sweep</option>
           <option value="off">Effect: off</option>
         </select>
+        <button class="ctl wide" id="btn-stale" onclick="toggleStale()">Old data (grey)</button>
       </div>
     </div>
 
@@ -603,8 +604,7 @@ function drawBlockchainIcon(x0, y0, r, g, b, midColor, newestColor) {
 // own. Drawn as the first part of the 24h change indicator (see
 // drawChangeIndicator), not beside the price itself.
 const ARROW_W = 5, ARROW_GAP = 2;
-function drawPriceArrow(x, y, up) {
-  const color = up ? [0, 255, 70] : [255, 60, 60];
+function drawPriceArrow(x, y, up, color = up ? [0, 255, 70] : [255, 60, 60]) {
   const rows = up
     ? [[2], [1,2,3], [0,1,2,3,4]]   // point at top, widening downward
     : [[0,1,2,3,4], [1,2,3], [2]];  // wide at top, point at bottom
@@ -983,7 +983,12 @@ let state = {
   block: 968267,    // realistic current height; Randomise sometimes picks a 7-digit one
   priceUp: true,    // daily price direction — drives the arrow and the price color
   priceChangePct: 2.34, // 24h % change (signed); shown as ▲/▼ + magnitude next to the price. null = unknown (indicator hidden)
+  priceStale: false,    // the price hasn't been refreshed for a while: price, 24h % and Sat row drawn grey
+  blockStale: false,    // the block height hasn't been refreshed for a while: drawn grey
 };
+// Figures too old to trust are drawn in this grey instead of their own
+// colour (the sketch's STALE_RGB). ERR is only for no data at all.
+const STALE_GREY = [125, 125, 135];
 
 // Demo-only USD/JPY rate so the simulator has something plausible to show;
 // the real firmware fetches BTC/JPY directly rather than converting.
@@ -1333,6 +1338,7 @@ function priceTick(delta) {
   const before = priceStrings(), beforePct = state.priceChangePct;
   const old = state.price;
   state.price = Math.max(1, state.price + delta);
+  state.priceStale = false;   // a successful fetch
   if (state.priceChangePct !== null) {
     // Same 24h window, new price: the % moves by the same relative amount.
     state.priceChangePct = Math.round(((1 + state.priceChangePct / 100) * state.price / old - 1) * 10000) / 100;
@@ -1411,7 +1417,7 @@ function drawSatText(str, x, y, key) {
   const p = priceFxProgress();
   const a = priceAnim && priceAnim[key];
   const dir = priceAnim ? priceAnim['satDir' + key.slice(3)] : 1;   // satUsd → satDirUsd, satEur → satDirEur, …
-  const endX = drawFxText(str, a && a[1] === str ? a[0] : undefined, x, y, SAT_COLOR, dir, p, SAT_FLASH);
+  const endX = drawFxText(str, a && a[1] === str ? a[0] : undefined, x, y, state.priceStale ? STALE_GREY : SAT_COLOR, dir, p, SAT_FLASH);
   applyPriceSweep(x, endX, y);
   return endX;
 }
@@ -1445,8 +1451,8 @@ function drawChangeIndicator(priceX, y) {
   if (state.priceChangePct === null) return priceX;   // unknown 24h change: hide rather than show a made-up 0.0%
   const text = changeIndicatorText();
   const x = priceX - CHANGE_GAP - changeIndicatorWidth(text);   // sits just left of the price
-  const col = state.priceUp ? [0, 255, 70] : [255, 60, 60];
-  drawPriceArrow(x, y, state.priceUp);
+  const col = state.priceStale ? STALE_GREY : state.priceUp ? [0, 255, 70] : [255, 60, 60];
+  drawPriceArrow(x, y, state.priceUp, col);
   // Decimal point drawn as a narrow 2px dot instead of the font's '.',
   // which sits in a full 6px cell and makes "2.3%" read as "2. 3%".
   // Whole part and "tenth%" part animate separately (each right-aligned),
@@ -1544,7 +1550,8 @@ function renderNormal(err=false) {
   const BLOCK_ORANGE = [255, 165, 30];       // the current/newest block — full brightness
   const BLOCK_PAST = [90, 90, 90];           // older blocks — desaturated to gray, fading into color as they approach the present
   // Unknown 24h change keeps the price green (its original color), same as the sketch's priceDirectionColor().
-  const PRICE_COLOR = (state.priceChangePct === null || state.priceUp) ? [0, 255, 70] : [255, 60, 60];
+  const PRICE_COLOR = state.priceStale ? STALE_GREY
+    : (state.priceChangePct === null || state.priceUp) ? [0, 255, 70] : [255, 60, 60];
   const incomingActive = blockAnim && !err;
   const now = performance.now();
   const p = incomingActive
@@ -1560,7 +1567,11 @@ function renderNormal(err=false) {
   const staticSatRightX = err
     ? (BLOCK_FIRST_DIGIT_X + measureTextWidth('ERR'))
     : blockAnim
-    ? (BLOCK_FIRST_DIGIT_X + measureTextWidth(blockAnim.oldValue.toString()))
+    // The wider of the old and new number for the whole animation: when the
+    // height gains a digit (999,999 → 1,000,000) the rows move once, at the
+    // start, while the number itself is off screen — and the new number
+    // lands already lined up with them.
+    ? (BLOCK_FIRST_DIGIT_X + Math.max(measureTextWidth(blockAnim.oldValue.toString()), measureTextWidth(blockAnim.newValue.toString())))
     : (BLOCK_FIRST_DIGIT_X + measureTextWidth(state.block.toString()));
   const staticSatBlockEndX = staticSatRightX;
 
@@ -1676,7 +1687,7 @@ function renderNormal(err=false) {
     // darkened to imply they're history now.
     drawChainStub(BLOCK_FIELD_X, BLOCK_Y, fbSet);
     drawBlockchainIcon(BLOCK_FIELD_X + 3, BLOCK_Y, ...BLOCK_PAST, [170, 140, 90], BLOCK_ORANGE);
-    blockEndX = drawText((err ? 'ERR' : state.block.toString()), BLOCK_FIRST_DIGIT_X, BLOCK_Y, ...BLOCK_ORANGE);
+    blockEndX = drawText((err ? 'ERR' : state.block.toString()), BLOCK_FIRST_DIGIT_X, BLOCK_Y, ...(state.blockStale && !err ? STALE_GREY : BLOCK_ORANGE));
   }
 
   if (currency === 'JPY') {
@@ -1684,9 +1695,9 @@ function renderNormal(err=false) {
     // "1377", matching how large yen amounts are natively read in Japan.
     // Block height, price and Sat rows all share one RIGHT edge (the end of
     // the block number), so digits line up by place value down the screen.
-    // Uses staticSatBlockEndX — the OLD block value's width during the
-    // new-block animation — so neither the price nor the Sat row moves
-    // while the animation plays.
+    // Uses staticSatBlockEndX — fixed for the whole new-block animation
+    // (the wider of the old and new value) — so neither the price nor the
+    // Sat row slides while the animation plays.
     const manValue = Math.round(priceJPY() / 10000);
     const priceText = '¥' + manValue;
     const priceW = err ? measureTextWidth('¥ERR') : measureTextWidth(priceText) + MAN_GLYPH_SIZE;
@@ -1888,6 +1899,7 @@ function startNewBlockAnimation() {
     start: performance.now(),
     duration: 1700,
   };
+  state.blockStale = false;   // a new height just arrived
   redraw();
 }
 
@@ -1941,12 +1953,22 @@ function updateStatus() {
     return;
   }
   const eur = currencyOptions[currentCurrencyIndex] === 'EUR';
-  setStat('s-price', jpy ? '¥' + priceJPY().toLocaleString() : eur ? '€' + priceEUR().toLocaleString() : '$' + state.price.toLocaleString());
+  const oldP = state.priceStale ? ' (old)' : '';
+  setStat('s-price', (jpy ? '¥' + priceJPY().toLocaleString() : eur ? '€' + priceEUR().toLocaleString() : '$' + state.price.toLocaleString()) + oldP, state.priceStale ? 'muted' : '');
   if (state.priceChangePct === null) setStat('s-change', 'missing (hidden)', 'muted');
   else setStat('s-change', (state.priceUp ? '▲ ' : '▼ ') + Math.abs(state.priceChangePct).toFixed(2) + '%',
                state.priceUp ? 'up' : 'down');
   setStat('s-sats', jpy ? satsPer100Yen().toLocaleString() + ' / ¥100' : eur ? satsPerEUR().toLocaleString() + ' / €1' : sats().toLocaleString() + ' / $1');
-  setStat('s-block', state.block.toLocaleString());
+  setStat('s-block', state.block.toLocaleString() + (state.blockStale ? ' (old)' : ''), state.blockStale ? 'muted' : '');
+}
+
+// "Old data": what the panel shows when checks keep failing — the last
+// figures stay up, in grey, until fresh ones arrive (New block / Price tick
+// bring each back). Pressed again, both are fresh again.
+function toggleStale() {
+  const on = !(state.priceStale && state.blockStale);
+  state.priceStale = state.blockStale = on;
+  redraw();
 }
 
 function setChangeMissing() {
@@ -2064,7 +2086,7 @@ function simStatus() {
     change: state.priceChangePct,
     sats: noData ? 0 : (jpy ? satsPer100Yen() : currencyOptions[currentCurrencyIndex] === 'EUR' ? satsPerEUR() : sats()),
     updatedAgo: up % SIM_INTERVAL_SECS[simInterval],
-    stale: false,
+    stale: state.priceStale || state.blockStale,
     priceFrom: noData ? '' : (simPriceSrc === 2 ? 'mempool.space + Coinbase' : 'CoinGecko'),
     priceSrc: simPriceSrc, priceSrcs: SIM_PRICE_SRCS.slice(),
     nodeUrl: simNodeUrl, nodeOk: simBlockSrc === 3 && simNodeUrl ? simNodeOk : null,
