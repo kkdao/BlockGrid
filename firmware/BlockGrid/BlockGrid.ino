@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// BlockGrid v1.0
+// BlockGrid v1.1
 //
 // A desk-size Bitcoin dashboard for an ESP32 driving a Waveshare
 // RGB-Matrix-P2.5-96x48-F (96x48 HUB75) LED panel: the current block height,
@@ -16,7 +16,7 @@
 // MIT License, (c) 2026 n0cturnality. See LICENSE.
 // ---------------------------------------------------------------------------
 
-#define BLOCKGRID_VERSION "1.0"
+#define BLOCKGRID_VERSION "1.1"
 
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <WiFi.h>
@@ -258,6 +258,8 @@ struct PriceSnapshot {
     float    priceEUR;
     float    satsPerEUR;
     float    changePctEUR;
+    bool     priceStale;   // the price figures are too old to trust: drawn grey
+    bool     blockStale;   // likewise the block height
 };
 
 // Drives the new-block arrival animation in displayBitcoinInfo() (see the
@@ -692,6 +694,9 @@ void fmtSatJpy(char *buf, size_t n, float satsPer100Yen) {
 }
 const uint8_t SAT_RGB[3]       = { 255, 228, 190 };   // warm white — the Sat/$1 (Sat/¥100) row
 const uint8_t SAT_FLASH_RGB[3] = { 255, 255, 255 };   // bright white — the Sat row's flash colour
+// Figures too old to trust (see currentSnapshot()) are drawn in this grey
+// instead of their own colour. Same as the simulator's STALE_GREY.
+const uint8_t STALE_RGB[3]     = { 125, 125, 135 };
 
 // Sweep band for the row currently being drawn (see fxPixel()).
 struct { bool on = false; float bx = 0; int16_t x0 = 0, x1 = 0; } fxSweep;
@@ -774,8 +779,9 @@ int16_t drawFxText(const char *str, const char *oldStr, int16_t x, int16_t y,
 // Drawn as the first part of the 24h change indicator (see
 // drawChangeIndicator below), not beside the price itself.
 // Ported from the simulator's drawPriceArrow() (matrix_sim_v3_1.html).
-void drawPriceArrow(int16_t x, int16_t y, bool up) {
+void drawPriceArrow(int16_t x, int16_t y, bool up, bool stale) {
     uint8_t r = up ? 0 : 255, g = up ? 255 : 60, b = up ? 70 : 60;
+    if (stale) { r = STALE_RGB[0]; g = STALE_RGB[1]; b = STALE_RGB[2]; }
     // Pixel by pixel through fxPixel() so the sweep effect can light it too.
     static const uint8_t upRows[3][2]   = { {2, 1}, {1, 3}, {0, 5} };   // {first x, length} for rows y+2..y+4
     static const uint8_t downRows[3][2] = { {0, 5}, {1, 3}, {2, 1} };
@@ -808,12 +814,14 @@ int16_t changeIndicatorWidth(float changePct) {
 }
 // oldPct: the "2.3%" string shown before the last fetch (for the price-change
 // effect), pctDir: whether its magnitude went up (+1) or down (-1).
-void drawChangeIndicator(int16_t priceX, int16_t y, float changePct, const char *oldPct, int8_t pctDir, float p) {
+// stale: drawn grey (see STALE_RGB), arrow included.
+void drawChangeIndicator(int16_t priceX, int16_t y, float changePct, const char *oldPct, int8_t pctDir, float p, bool stale) {
     bool up = changePct >= 0.0f;
     uint8_t r = up ? 0 : 255, g = up ? 255 : 60, b = up ? 70 : 60;
+    if (stale) { r = STALE_RGB[0]; g = STALE_RGB[1]; b = STALE_RGB[2]; }
     int16_t x = priceX - CHANGE_GAP - changeIndicatorWidth(changePct);
 
-    drawPriceArrow(x, y, up);
+    drawPriceArrow(x, y, up, stale);
     // Whole part and "tenth%" part animate separately (each right-aligned),
     // so the narrow decimal dot never moves.
     char pct[12]; fmtPct(pct, sizeof pct, changePct);
@@ -832,15 +840,17 @@ void drawChangeIndicator(int16_t priceX, int16_t y, float changePct, const char 
 }
 
 // Sat/$1 (Sat/¥100) row, right-aligned to rightX, with the price-change
-// effect (warm white; flash in bright white; its own sweep band).
-void drawSatRow(const char *satStr, const char *oldSat, int8_t satDir, int16_t rightX, int16_t y, bool ok) {
+// effect (warm white; flash in bright white; its own sweep band). Grey
+// when stale.
+void drawSatRow(const char *satStr, const char *oldSat, int8_t satDir, int16_t rightX, int16_t y, bool ok, bool stale) {
     int16_t x = rightX - 6 * (int16_t)strlen(satStr);
     float p = ok ? priceFxProgress() : -1.0f;
     int16_t x1 = x + 6 * (int16_t)strlen(satStr);
     fxSweep.on = p >= 0.0f && currentPriceFx == FX_SWEEP;
     fxSweep.x0 = x; fxSweep.x1 = x1;
     fxSweep.bx = x - 4 + (x1 - x + 8) * fxEase(p < 0 ? 0 : p);
-    drawFxText(satStr, oldSat, x, y, SAT_RGB[0], SAT_RGB[1], SAT_RGB[2], satDir, p, SAT_FLASH_RGB);
+    const uint8_t *rgb = stale ? STALE_RGB : SAT_RGB;
+    drawFxText(satStr, oldSat, x, y, rgb[0], rgb[1], rgb[2], satDir, p, SAT_FLASH_RGB);
     fxSweep.on = false;
 }
 
@@ -1115,6 +1125,7 @@ int8_t nodeOk = -1;                // last answer from the node: 1 yes, 0 no, -1
 char nodeErr[40] = "";             // why it didn't answer, for the web page
 char blockErr[40] = "";            // why the last block-height request failed (fetchBlockHeightFrom())
 const char *lastBlockFrom = "";    // where the block height shown came from (shown on the web page)
+const char *shownBlockFrom = "";   // where lastBlockHeight came from (see fetchAndCacheBitcoinData())
 String webPendingNodeUrl;          // from the web page, applied in processWebCommands()
 std::atomic<bool> webPendingNodeUrlSet{false};
 
@@ -1155,8 +1166,8 @@ unsigned long updateIntervalMs() { return intervalSecs[currentInterval] * 1000UL
 // the next one later and later.
 bool priceCheckDue() { return lastPriceCheckMs == 0 || millis() - lastPriceCheckMs >= updateIntervalMs(); }
 bool blockCheckDue() { return lastBlockCheckMs == 0 || millis() - lastBlockCheckMs >= BLOCK_CHECK_MS; }
-// Cached prices are shown until they're this old, then the row shows ERR:
-// 5 minutes, or three missed checks when checking less often than that.
+// Cached prices are shown in their colours until they're this old, then
+// grey: 5 minutes, or three missed checks when checking less often than that.
 // (The block height always uses 5 minutes — see BLOCK_STALE_AFTER_MS.)
 unsigned long dataStaleAfterMs() {
     unsigned long three = 3UL * updateIntervalMs();
@@ -1189,10 +1200,10 @@ float    lastSatsPerEUR   = 0.0f;   // sats per €1
 float    lastChangePctEUR = NAN;
 
 // The last* values above only ever hold the last SUCCESSFUL fetch — a
-// failed fetch leaves them alone. The screen keeps showing them and only
-// switches to ERR once they're older than DATA_STALE_AFTER_MS (see
-// currentSnapshot()). Price and block height are tracked separately since
-// they come from different servers and fail independently.
+// failed fetch leaves them alone. The screen keeps showing them, in grey
+// once they're older than DATA_STALE_AFTER_MS (see currentSnapshot()).
+// Price and block height are tracked separately since they come from
+// different servers and fail independently.
 #define DATA_STALE_AFTER_MS (dataStaleAfterMs())   // prices: 5 min, or 3 missed checks if checking less often
 #define BLOCK_STALE_AFTER_MS (5UL * 60UL * 1000UL)   // block height: ~5 missed checks
 bool          havePriceData   = false;
@@ -2233,9 +2244,9 @@ void buildStatusJson(char *buf, size_t bufSize) {
     Currency cur = currencyOptions[currIdx];
     bool jpy = cur == Currency::JPY, eur = cur == Currency::EUR;
 
-    // "error" = the panel is showing ERR for both rows (nothing current at
-    // all); "stale" = still showing cached values, but the last successful
-    // fetch is more than two refresh cycles old.
+    // "error" = the panel is showing ERR for both rows (no data at all since
+    // the restart); "stale" = still showing cached values, but the last
+    // successful fetch is more than two refresh cycles old.
     const char *mode = !bootComplete ? "starting"
                      : (snap.priceUSD <= 0.0f && snap.blockHeight == 0) ? "error" : "normal";
     bool stale = (havePriceData && now - lastGoodPriceMs > 2 * updateIntervalMs()) ||
@@ -3574,16 +3585,20 @@ void displayBitcoinInfo(const PriceSnapshot &snap, BlockAnim *anim) {
             dma_display->setCursor(numberX, BLOCK_Y);
             dma_display->print(anim->newValue);
         }
-        // Right edge for the price and Sat rows: the OLD value's width for
-        // the entire animation (not getCursorX(), which would follow the
-        // still-sliding number). If the digit count changes (999,999 ->
-        // 1,000,000) the rows jump once, on the final static frame.
-        blockEndX = BLOCK_FIRST_DIGIT_X + 6 * numDigits(anim->oldValue);
+        // Right edge for the price and Sat rows: fixed for the entire
+        // animation (not getCursorX(), which would follow the still-sliding
+        // number), at the wider of the old and new value. When the height
+        // gains a digit (999,999 -> 1,000,000) the rows move once, on the
+        // first frame, while the number is off screen, and the new number
+        // lands lined up with them.
+        uint8_t oldDigits = numDigits(anim->oldValue), newDigits = numDigits(anim->newValue);
+        blockEndX = BLOCK_FIRST_DIGIT_X + 6 * (newDigits > oldDigits ? newDigits : oldDigits);
     } else {
         drawChainStub(BLOCK_FIELD_X, BLOCK_Y, 90, 90, 90);
         drawBlockchainIcon(BLOCK_FIELD_X + 3, BLOCK_Y, 90, 90, 90, 170, 140, 90, 255, 165, 30);  // oldest darkest, middle in between, newest full orange
         dma_display->setCursor(BLOCK_FIRST_DIGIT_X, BLOCK_Y);
         if (snap.blockHeight > 0) {
+            if (snap.blockStale) dma_display->setTextColor(dma_display->color565(STALE_RGB[0], STALE_RGB[1], STALE_RGB[2]));
             dma_display->print(snap.blockHeight);
         } else {
             dma_display->print("ERR");
@@ -3601,7 +3616,8 @@ void displayBitcoinInfo(const PriceSnapshot &snap, BlockAnim *anim) {
         // becomes "1377", matching how large yen amounts are natively read
         // in Japan.
         bool jpyOk = snap.priceJPY > 0.0f;
-        uint16_t jpyColor = priceDirectionColor(snap.changePctJPY);
+        bool stale = snap.priceStale;
+        uint16_t jpyColor = stale ? dma_display->color565(STALE_RGB[0], STALE_RGB[1], STALE_RGB[2]) : priceDirectionColor(snap.changePctJPY);
         bool jpyUp = isnan(snap.changePctJPY) || snap.changePctJPY >= 0.0f;
         // Fixed stack buffers instead of String temporaries: this function
         // runs every frame of the block animation (~28 times in 1.7s), and
@@ -3623,9 +3639,11 @@ void displayBitcoinInfo(const PriceSnapshot &snap, BlockAnim *anim) {
         fxSweep.x0 = rowX0; fxSweep.x1 = rowX1;
         fxSweep.bx = rowX0 - 4 + (rowX1 - rowX0 + 8) * fxEase(fxP < 0 ? 0 : fxP);
 
-        if (showPct) drawChangeIndicator(priceX, PRICE_Y, snap.changePctJPY, priceFx.oldPctJpy, priceFx.pctDirJpy, fxP);
+        if (showPct) drawChangeIndicator(priceX, PRICE_Y, snap.changePctJPY, priceFx.oldPctJpy, priceFx.pctDirJpy, fxP, stale);
         int16_t manX = drawFxText(jpyStr, priceFx.oldJpy, priceX, PRICE_Y,
-                                  jpyOk ? (jpyUp ? 0 : 255) : 0, jpyOk ? (jpyUp ? 255 : 60) : 255, jpyOk ? (jpyUp ? 70 : 60) : 70,
+                                  stale ? STALE_RGB[0] : jpyOk ? (jpyUp ? 0 : 255) : 0,
+                                  stale ? STALE_RGB[1] : jpyOk ? (jpyUp ? 255 : 60) : 255,
+                                  stale ? STALE_RGB[2] : jpyOk ? (jpyUp ? 70 : 60) : 70,
                                   priceFx.dir, fxP);
         fxSweep.on = false;
         if (jpyOk) {
@@ -3644,7 +3662,7 @@ void displayBitcoinInfo(const PriceSnapshot &snap, BlockAnim *anim) {
         // line's "Sat/$1:". Right-aligned to the shared right edge.
         char jpySatStr[24];
         fmtSatJpy(jpySatStr, sizeof jpySatStr, snap.satsPer100Yen);
-        drawSatRow(jpySatStr, priceFx.oldSatJpy, priceFx.satDirJpy, blockEndX, SAT_Y, snap.satsPer100Yen > 0.0f);
+        drawSatRow(jpySatStr, priceFx.oldSatJpy, priceFx.satDirJpy, blockEndX, SAT_Y, snap.satsPer100Yen > 0.0f, stale);
     } else {
         // BTC/USD or BTC/EUR: the same layout, the full price. EUR swaps in
         // its own figures, the € sign and its own effect state.
@@ -3659,6 +3677,7 @@ void displayBitcoinInfo(const PriceSnapshot &snap, BlockAnim *anim) {
         int8_t satDir  = eur ? priceFx.satDirEur : priceFx.satDirUsd;
         bool usdOk = fiatPrice > 0.0f;
         bool usdUp = isnan(fiatChange) || fiatChange >= 0.0f;
+        bool stale = snap.priceStale;
         char usdStr[16];   // "$84509" / "€77450"
         if (usdOk) (eur ? fmtEurPrice : fmtUsdPrice)(usdStr, sizeof usdStr, fiatPrice);
         else       strcpy(usdStr, eur ? "\x9E" "ERR" : "$ERR");
@@ -3674,16 +3693,18 @@ void displayBitcoinInfo(const PriceSnapshot &snap, BlockAnim *anim) {
         fxSweep.x0 = rowX0; fxSweep.x1 = rowX1;
         fxSweep.bx = rowX0 - 4 + (rowX1 - rowX0 + 8) * fxEase(fxP < 0 ? 0 : fxP);
 
-        if (showPct) drawChangeIndicator(priceX, PRICE_Y, fiatChange, oldPct, pctDir, fxP);
+        if (showPct) drawChangeIndicator(priceX, PRICE_Y, fiatChange, oldPct, pctDir, fxP, stale);
         drawFxText(usdStr, oldPrice, priceX, PRICE_Y,
-                   usdOk ? (usdUp ? 0 : 255) : 0, usdOk ? (usdUp ? 255 : 60) : 255, usdOk ? (usdUp ? 70 : 60) : 70,
+                   stale ? STALE_RGB[0] : usdOk ? (usdUp ? 0 : 255) : 0,
+                   stale ? STALE_RGB[1] : usdOk ? (usdUp ? 255 : 60) : 255,
+                   stale ? STALE_RGB[2] : usdOk ? (usdUp ? 70 : 60) : 70,
                    priceFx.dir, fxP);
         fxSweep.on = false;
 
         // Sats per dollar (euro) — right-aligned to the shared right edge.
         char usdSatStr[24];
         (eur ? fmtSatEur : fmtSatUsd)(usdSatStr, sizeof usdSatStr, fiatSats);
-        drawSatRow(usdSatStr, oldSat, satDir, blockEndX, SAT_Y, fiatSats > 0.0f);
+        drawSatRow(usdSatStr, oldSat, satDir, blockEndX, SAT_Y, fiatSats > 0.0f, stale);
     }
 
     // Logo (overlaps the first letter of the title intentionally)
@@ -4022,10 +4043,22 @@ PriceSnapshot fetchAndCacheBitcoinData(bool allowUi) {
     } else if (wantPrice && havePriceData) {
         Serial.printf("Price fetch failed — keeping cached price from %lus ago\n", (millis() - lastGoodPriceMs) / 1000UL);
     }
-    if (blockHeight > 0) {
+    // A backup server can be a block behind the server that gave the height
+    // on screen (your node, or the other public server in Auto): it hasn't
+    // seen the newest block yet. Its lower answer is ignored while the
+    // height on screen is recent, so the number doesn't step back and the
+    // new-block animation doesn't play again for a block already shown. A
+    // lower height from the same server (a chain reorganisation) is taken.
+    if (blockHeight > 0 && haveBlockData && blockHeight < lastBlockHeight &&
+        strcmp(lastBlockFrom, shownBlockFrom) != 0 && millis() - lastGoodBlockMs < BLOCK_STALE_AFTER_MS) {
+        Serial.printf("Block height %u from %s is behind %s's %u — keeping that\n",
+                      blockHeight, lastBlockFrom, shownBlockFrom, lastBlockHeight);
+        lastBlockFrom = shownBlockFrom;   // the web page names the source of the height shown
+    } else if (blockHeight > 0) {
         lastBlockHeight = blockHeight;
         lastGoodBlockMs = millis();
         haveBlockData   = true;
+        shownBlockFrom  = lastBlockFrom;
     } else if (wantBlock && haveBlockData) {
         Serial.printf("Block height fetch failed — keeping cached height from %lus ago\n", (millis() - lastGoodBlockMs) / 1000UL);
     }
@@ -4033,26 +4066,29 @@ PriceSnapshot fetchAndCacheBitcoinData(bool allowUi) {
     return currentSnapshot();
 }
 
-// What the screen should show right now: the cached values while they're
-// fresh, or 0 (drawn as ERR) once they're older than DATA_STALE_AFTER_MS
-// or if there's never been a successful fetch. Price-derived fields go
-// stale together; block height goes stale on its own. Used for every
-// redraw — scheduled refreshes and button presses alike.
+// What the screen should show right now: the cached values, or 0 (drawn
+// as ERR) if there's never been a successful fetch since the restart. Once
+// they're older than DATA_STALE_AFTER_MS (prices) or BLOCK_STALE_AFTER_MS
+// (block height) they're marked stale and drawn grey, so the last figures
+// stay readable while it's clear they're old. Price-derived fields go stale
+// together; block height goes stale on its own. Used for every redraw —
+// scheduled refreshes and button presses alike.
 PriceSnapshot currentSnapshot() {
     unsigned long now = millis();
-    bool priceFresh = havePriceData && (now - lastGoodPriceMs <= DATA_STALE_AFTER_MS);
-    bool blockFresh = haveBlockData && (now - lastGoodBlockMs <= BLOCK_STALE_AFTER_MS);
+    bool p = havePriceData, b = haveBlockData;
     return {
-        priceFresh ? lastPrice         : 0.0f,
-        priceFresh ? lastSatoshis      : 0.0f,
-        priceFresh ? lastPriceJPY      : 0.0f,
-        priceFresh ? lastSatsPer100Yen : 0.0f,
-        blockFresh ? lastBlockHeight   : 0,
-        priceFresh ? lastChangePctUSD  : NAN,
-        priceFresh ? lastChangePctJPY  : NAN,
-        priceFresh ? lastPriceEUR      : 0.0f,
-        priceFresh ? lastSatsPerEUR    : 0.0f,
-        priceFresh ? lastChangePctEUR  : NAN,
+        p ? lastPrice         : 0.0f,
+        p ? lastSatoshis      : 0.0f,
+        p ? lastPriceJPY      : 0.0f,
+        p ? lastSatsPer100Yen : 0.0f,
+        b ? lastBlockHeight   : 0,
+        p ? lastChangePctUSD  : NAN,
+        p ? lastChangePctJPY  : NAN,
+        p ? lastPriceEUR      : 0.0f,
+        p ? lastSatsPerEUR    : 0.0f,
+        p ? lastChangePctEUR  : NAN,
+        p && now - lastGoodPriceMs > DATA_STALE_AFTER_MS,
+        b && now - lastGoodBlockMs > BLOCK_STALE_AFTER_MS,
     };
 }
 
@@ -4214,7 +4250,7 @@ void loop() {
                 reconnectDelayMs = reconnectDelayMs * 2 > WIFI_RETRY_MAX_MS ? WIFI_RETRY_MAX_MS : reconnectDelayMs * 2;
             }
             // Keep the screen honest while offline: once the data is too old
-            // it turns to ERR, as it would after failed checks.
+            // it turns grey, as it would after failed checks.
             if (now - lastOfflineRedrawMs >= BLOCK_CHECK_MS) {
                 lastOfflineRedrawMs = now;
                 displayBitcoinInfo(currentSnapshot());
