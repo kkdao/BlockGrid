@@ -18,7 +18,20 @@
 
 #define BLOCKGRID_VERSION "1.1"
 
+// ---------- Display: HUB75 panel or Cheap Yellow Display ----------
+// 0 = the Waveshare 96x48 HUB75 LED panel (the build in the README).
+// 1 = an ESP32-2432S028R "Cheap Yellow Display": the same 96x48 picture,
+//     three times larger in the middle of its 320x240 screen. Uses
+//     LovyanGFX instead of the HUB75 library (see CydDisplay.h) and the
+//     "Minimal SPIFFS" partition scheme; the buttons are left out, as their
+//     pins are the CYD's touch and SD lines.
+#define DISPLAY_CYD 0
+
+#if DISPLAY_CYD
+#include "CydDisplay.h"
+#else
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
+#endif
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -46,6 +59,10 @@
 //     control page (http://blockgrid-xxxx.local). The button pins are left
 //     alone and never read, so nothing needs to be connected to them.
 #define HAS_BUTTONS 1
+#if DISPLAY_CYD
+#undef HAS_BUTTONS
+#define HAS_BUTTONS 0
+#endif
 
 // ---------- Pin definitions ----------
 #define R1_PIN_DEFAULT  25
@@ -127,7 +144,7 @@ const uint8_t BRIGHTNESS_LEVELS[] = { 1, 2, 3, 4, 5, 6, 8, 10, 13, 17, 22, 28, 3
 // its 8-bit table and mixed colours come out wrong. build_opt.h reaches the
 // library's compile too. After adding or changing it, restart the Arduino
 // IDE so the library is rebuilt.
-#ifndef PIXEL_COLOR_DEPTH_BITS
+#if !DISPLAY_CYD && !defined(PIXEL_COLOR_DEPTH_BITS)
 #error "Colour depth not set: put build_opt.h (one line: -DPIXEL_COLOR_DEPTH_BITS=6) in this sketch's folder, then restart the Arduino IDE so the library is rebuilt"
 #endif
 
@@ -388,7 +405,11 @@ const tImage *manGlyph = &manGlyphImg;
 // than where the rest of the globals live. Arduino's build system doesn't
 // reorder global variable declarations the way it does function
 // prototypes, so this one has to physically come first.
+#if DISPLAY_CYD
+CydDisplay *dma_display = nullptr;
+#else
 MatrixPanel_I2S_DMA *dma_display = nullptr;
+#endif
 
 // ---------- Text font (matches the simulator exactly) ----------
 // Every piece of text on the panel is drawn with this font instead of
@@ -2905,6 +2926,10 @@ void setup() {
     coingeckoClient.setHandshakeTimeout(5);   // seconds
     mempoolClient.setHandshakeTimeout(5);
 
+#if DISPLAY_CYD
+    dma_display = new CydDisplay(PANEL_RES_X, PANEL_RES_Y);
+    if (!dma_display->begin()) Serial.println("Couldn't start the display (out of memory?)");
+#else
     // Matrix panel config
     HUB75_I2S_CFG mxconfig(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
     mxconfig.gpio.e  = E_PIN_DEFAULT;
@@ -2942,6 +2967,7 @@ void setup() {
 
     dma_display = new MatrixPanel_I2S_DMA(mxconfig);
     dma_display->begin();
+#endif
     dma_display->setBrightness8(currentBrightness);
     dma_display->clearScreen();
     dma_display->flipDMABuffer(); // makes the initial blank screen actually visible — with double buffering, the front buffer otherwise stays whatever it was until the first flip
@@ -3719,6 +3745,9 @@ void displayBitcoinInfo(const PriceSnapshot &snap, BlockAnim *anim) {
         for (int16_t ly = 0; ly < brand.logo->height; ly++)
             for (int16_t lx = 0; lx < brand.logo->width; lx++) {
                 uint16_t px = brand.logo->data[ly * brand.logo->width + lx];
+#if DISPLAY_CYD
+                if (px != 0) px = cydAmberLogo(px);
+#endif
                 if (px != 0) dma_display->drawPixel(brand.logoX + lx, brand.logoY + ly, px);
             }
     } else if (brand.titleImage == nullptr) {

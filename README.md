@@ -121,6 +121,16 @@ Everything else (Wi-Fi, the web server, HTTPS, OTA) comes with the ESP32 board p
 
 Each BlockGrid has its own setup password, which also protects over-the-air updates.
 
+## On a Cheap Yellow Display
+
+BlockGrid also runs on an ESP32-2432S028R "Cheap Yellow Display", an ESP32 with a 320×240 screen on the back, with no LED panel or wiring. The 96×48 picture is drawn three times larger in the middle of the screen. Install it as above, with these changes:
+
+- In step 2, install **LovyanGFX** by lovyan03, version **1.2.35**, instead of the HUB75 library. Adafruit GFX and ArduinoJson are still needed.
+- In step 3, set **`DISPLAY_CYD`** to `1` near the top of the sketch. `PANEL_VERSION` and `HAS_BUTTONS` don't matter: the board has no free pins for the buttons, so the web control page does everything.
+- Before uploading, choose **Tools → Partition Scheme → Minimal SPIFFS (1.9MB APP with OTA)**. The sketch is too big for the default scheme with the screen library added.
+
+The touchscreen isn't used. Cheap Yellow Displays vary between batches: this was tested on one whose screen takes ILI9341 commands but is laid out landscape, and boards with other screen chips (such as the ST7789 on some two-USB versions) haven't been tested.
+
 ## Using it
 
 **Buttons** (if fitted):
@@ -143,7 +153,7 @@ Each BlockGrid has its own setup password, which also protects over-the-air upda
 
 | Path | Contents |
 |---|---|
-| `firmware/BlockGrid/` | The Arduino sketch and `build_opt.h` |
+| `firmware/BlockGrid/` | The Arduino sketch, `build_opt.h` and `CydDisplay.h` (the Cheap Yellow Display's screen) |
 | `docs/index.html` | The simulator (also the live demo, via GitHub Pages) |
 | `docs/images/` | The GIFs and pictures on this page |
 | `hardware/` | Parts list, wiring, button board layout and assembly |
@@ -154,6 +164,7 @@ Each BlockGrid has its own setup password, which also protects over-the-air upda
 
 - [ESP32-HUB75-MatrixPanel-DMA](https://github.com/mrcodetastic/ESP32-HUB75-MatrixPanel-DMA) by mrcodetastic drives the panel.
 - [Adafruit GFX](https://github.com/adafruit/Adafruit-GFX-Library) draws the text and graphics.
+- [LovyanGFX](https://github.com/lovyan03/LovyanGFX) by lovyan03 drives the Cheap Yellow Display's screen.
 - [ArduinoJson](https://arduinojson.org/) by Benoit Blanchon reads the price data.
 - The katakana wordmark and the 万 symbol are built from the [Misaki font](https://littlelimit.net/misaki.htm) bitmaps by Num Kadoma.
 - Data comes from [mempool.space](https://mempool.space), [blockstream.info](https://blockstream.info), [CoinGecko](https://www.coingecko.com) and [Coinbase](https://www.coinbase.com). BlockGrid isn't affiliated with any of them.
